@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CS 550 Recommender — Demo</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Massive Data Mining — Recommender System Demo</h1>
+    <p class="sub">MovieLens-1M · 7 models · rating prediction + top-10 recommendation</p>
+  </header>
+
+  <section class="panel">
+    <h2>Test-set metrics</h2>
+    <table class="metrics">
+      <thead>
+        <tr>
+          <th>Model</th><th>MAE ↓</th><th>RMSE ↓</th>
+          <th>Precision@10 ↑</th><th>Recall@10 ↑</th>
+          <th>F1@10 ↑</th><th>NDCG@10 ↑</th>
+          <th>Train (s)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in metrics %}
+        <tr>
+          <td><strong>{{ r.model }}</strong></td>
+          <td>{{ '%.4f'|format(r.MAE) if r.MAE == r.MAE else '—' }}</td>
+          <td>{{ '%.4f'|format(r.RMSE) if r.RMSE == r.RMSE else '—' }}</td>
+          <td>{{ '%.4f'|format(r['Precision@K']) }}</td>
+          <td>{{ '%.4f'|format(r['Recall@K']) }}</td>
+          <td>{{ '%.4f'|format(r['F1@K']) }}</td>
+          <td>{{ '%.4f'|format(r['NDCG@K']) }}</td>
+          <td>{{ '%.1f'|format(r.train_sec) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Live recommendations</h2>
+    <div class="controls">
+      <label>User ID:
+        <input type="number" id="user" value="1" min="1">
+      </label>
+      <label>Model:
+        <select id="model">
+          {% for m in models %}<option>{{ m }}</option>{% endfor %}
+        </select>
+      </label>
+      <button id="go">Recommend</button>
+    </div>
+    <div class="grid">
+      <div>
+        <h3>Top-10 for user <span id="uname">—</span></h3>
+        <ul id="recs"></ul>
+      </div>
+      <div>
+        <h3>User history (highest rated in training)</h3>
+        <ul id="hist"></ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>CS 550 · Spring 2026 · MovieLens-1M · built with PyTorch + Flask</footer>
+
+  <script>
+    async function load() {
+      const u = document.getElementById('user').value;
+      const m = document.getElementById('model').value;
+      const res = await fetch(`/api/recommend?user_id=${u}&model=${m}`);
+      const data = await res.json();
+      if (data.error) { alert(data.error); return; }
+      document.getElementById('uname').textContent = data.user_id;
+      const recs = document.getElementById('recs'); recs.innerHTML = '';
+      data.recs.forEach((r, i) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="rank">#${i+1}</span> <strong>${r.title}</strong>
+          <span class="score">score ${r.score.toFixed(2)}</span>
+          <span class="genres">${r.genres}</span>`;
+        recs.appendChild(li);
+      });
+      const hist = document.getElementById('hist'); hist.innerHTML = '';
+      data.history.forEach(r => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="rank">${r.rating.toFixed(1)}</span>
+          <strong>${r.title}</strong> <span class="genres">${r.genres}</span>`;
+        hist.appendChild(li);
+      });
+    }
+    document.getElementById('go').addEventListener('click', load);
+    window.addEventListener('load', load);
+  </script>
+</body>
+</html>

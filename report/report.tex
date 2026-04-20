@@ -1,0 +1,187 @@
+\documentclass[10pt,conference]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{cite}
+\usepackage{enumitem}
+\usepackage{url}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, citecolor=blue!60!black, urlcolor=blue!60!black}
+
+\title{Seven Recommenders on MovieLens-1M\\[2pt]
+\large CS 550 Massive Data Mining and Learning --- Course Project}
+
+\author{%
+  Student Name \\[-1pt]
+  \small\texttt{NetID@institution.edu}
+}
+\date{Spring 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Seven recommender algorithms, one codebase, one split. On MovieLens-1M under a per-user 80/20 hold-out, we compare memory-based CF (user- and item-kNN with shrinkage), biased matrix factorisation, NeuMF, BPR-MF, and LightGCN on the two tasks the course spec asks for: rating prediction (MAE, RMSE) and Top-10 recommendation (P, R, F$_1$, NDCG). Every model is written from scratch in NumPy/PyTorch so the comparison does not hinge on a library's defaults.
+
+The headline number is a $2.6\times$ NDCG@10 gap between the pointwise MF ($0.125$) and BPR-MF ($0.320$) \emph{at identical bilinear scoring capacity}---the loss matters more than the architecture at this scale. The counterpart finding is a cleanly-controlled negative result for LightGCN: under a gradient-step budget matched to BPR-MF (batch $4{,}096$, 20 epochs), LightGCN's ranking metrics do not move at all relative to a much shorter run, and stay well below BPR-MF. Graph smoothing does not carry its weight on a dataset this dense. Finally, an exposure-fairness audit shows that LightGCN's entire Top-10 flows to head items ($0\%$ long-tail share), while the less-accurate kNN models expose $57$--$87\%$ of their lists to the tail---accuracy and fairness are Pareto-opposed here.
+\end{abstract}
+
+%-----------------------------------------------------------------------------
+\section{Introduction}
+The recommender literature has accumulated four broad paradigms over three decades: nearest-neighbour memory methods, latent-factor models, neural collaborative filtering, and graph convolutional networks. Each was the state of the art at some point; each left behind a handful of reusable ideas. A course project is a reasonable excuse to implement one representative from each paradigm on the same dataset, under the same split, and read off the trade-offs directly.
+
+We work on MovieLens-1M. The task, following the course spec, has two halves: rating prediction (predict $r_{ui}\in[1,5]$ on a held-out pair) and Top-10 recommendation (produce a ranked list of 10 unseen items per user). Seven models cover the four paradigms: \textsc{GlobalMean} and \textsc{BiasOnly} as sanity baselines; \textsc{ItemKNN} and \textsc{UserKNN} for memory-based CF; \textsc{MF} for biased matrix factorisation; \textsc{NeuMF} for neural CF; \textsc{BPR-MF} for pairwise ranking; \textsc{LightGCN} for graph convolution. All seven are implemented from primitives; no recommender library is imported.
+
+Two non-obvious findings came out of the experiments. (a) Pairwise ranking training beats pointwise MSE training by $2.6\times$ on NDCG@10 with identical scoring function---so the loss is doing more work than the architecture. (b) LightGCN underperforms BPR-MF on this dataset \emph{even when given identical gradient-step budgets}, ruling out the obvious "undertrained" explanation and suggesting the architecture itself does not pay for its cost on ML-1M. A short exposure-fairness audit at the end sharpens the story: the models that lead on NDCG are also the ones that funnel every recommendation to head items.
+
+%-----------------------------------------------------------------------------
+\section{Related Work}
+\label{sec:rw}
+Standard textbooks~\cite{Aggarwal2016,Ricci2015} give the full map; a pointer for each of our seven models suffices here.
+
+User-based neighbourhood CF dates to GroupLens~\cite{Resnick1994}. Sarwar et al.~\cite{Sarwar2001} later transposed the construction to the item side for better stability and offline pre-computation; the shrinkage weighting we use on the similarity is due to Herlocker et al.~\cite{Herlocker1999}. Memory methods are rarely state-of-the-art today but remain useful as interpretable baselines and as candidate generators in two-stage industrial pipelines.
+
+Biased SVD trained with SGD~\cite{Koren2009,Koren2008FactorizationNeighbor} has been the default rating-prediction baseline since the Netflix Prize. SVD++ adds implicit-feedback embeddings and timeSVD++ adds time-aware biases; neither is needed for this study.
+
+Rendle et al.~\cite{Rendle2009BPR} introduced BPR, a pairwise logistic surrogate of AUC, which remains the usual way to train a latent-factor model for ranking. Later losses---WARP~\cite{Weston2011WSABIE} with its hard-negative sampler, LambdaRank-family listwise losses---rarely displace BPR because BPR is a near-parameter-free drop-in. We use plain uniform negative sampling.
+
+NeuMF~\cite{He2017NCF} sits at the start of the neural-CF wave, fusing a dot-product branch with an MLP over concatenated embeddings. A retrospective by Dacrema et al.~\cite{Dacrema2021} found that much of the neural-CF literature's gains do not survive careful baseline tuning; our own numbers echo that. The graph thread runs NGCF~\cite{Wang2019NGCF} $\to$ LightGCN~\cite{He2020LightGCN}, the latter stripping NGCF down to symmetric-normalised propagation on the bipartite graph without feature transforms or non-linearities. LightGCN is reported with large GPU-scale training budgets; the comparison below on a more modest budget is one of the things we wanted to check.
+
+The sample presentation for this project was the P5 paper~\cite{Geng2022P5}, which unifies rating, sequential, direct, and explanation recommendation tasks behind a single text-to-text model---the LLM direction of the field. Other live threads include sequential recommendation (SASRec~\cite{Kang2018SASRec}), causal CF~\cite{Xu2021CCF}, and trustworthy-recommender work on user-side fairness~\cite{Li2021UserFair}, personalised explanation~\cite{Li2021PETER}, and counterfactual explanation~\cite{Tan2021CountER}. Of these, the fairness line is the one we pick up as an optional extension (\S\ref{sec:fair}).
+
+%-----------------------------------------------------------------------------
+\section{Data and Preprocessing}
+MovieLens-1M\footnote{\url{https://grouplens.org/datasets/movielens/}} has $1{,}000{,}209$ integer ratings on a 5-point scale from $6{,}040$ users on $3{,}706$ movies, and is 20-core on the user side. We drop items with fewer than 5 ratings to stabilise similarity estimation, which leaves $N_u{=}6040$, $N_i{=}3416$.
+
+The split is per-user, as the spec requires: 20\% of each user's ratings go to test, uniformly at random with seed $42$. That gives $|\mathcal{D}_{\text{train}}|{=}799{,}721$ and $|\mathcal{D}_{\text{test}}|{=}199{,}890$ at $95.16\%$ sparsity.
+
+%-----------------------------------------------------------------------------
+\section{Methods}
+Notation is standard: user $u\in\mathcal{U}$, item $i\in\mathcal{I}$, observed rating $r_{ui}$, global mean $\mu$, biases $b_u,b_i$, user and item factors $p_u,q_i\in\mathbb{R}^d$.
+
+\subsection{Baselines}
+\textbf{GlobalMean} predicts $\hat r_{ui}{=}\mu$. \textbf{BiasOnly} predicts $\hat r_{ui}{=}\mu{+}b_u{+}b_i$ with biases fit by 15 alternating closed-form ridge updates ($\lambda{=}5$).
+
+\subsection{Neighbourhood CF}
+Shrinkage-adjusted cosine on mean-centred ratings. For item--item,
+\begin{equation}
+s_{ij} = \frac{\sum_{u\in\mathcal{U}_{ij}}\tilde r_{ui}\tilde r_{uj}}{\|\tilde r_{\cdot i}\|\|\tilde r_{\cdot j}\|}\cdot\frac{|\mathcal{U}_{ij}|}{|\mathcal{U}_{ij}|+\alpha},\qquad \tilde r_{ui}=r_{ui}-\bar r_u,\ \alpha=100.
+\end{equation}
+Top-$k{=}50$ neighbours per item. Prediction is the usual Sarwar form~\cite{Sarwar2001}:
+\begin{equation}
+\hat r_{ui} = \bar r_u + \frac{\sum_{j\in N_k(i)\cap \mathcal{I}_u} s_{ij}\tilde r_{uj}}{\sum_{j\in N_k(i)\cap \mathcal{I}_u}|s_{ij}|}.
+\end{equation}
+UserKNN is the symmetric construction.
+
+\subsection{Biased Matrix Factorisation (MF)}
+$\hat r_{ui} = \mu + b_u + b_i + p_u^{\top}q_i$, with L2-regularised MSE loss. We use $d{=}64$ factors, 20 epochs of Adam mini-batch SGD, $\lambda{=}10^{-4}$.
+
+\subsection{Neural Collaborative Filtering (NeuMF)}
+NeuMF~\cite{He2017NCF} has two embedding tables: a GMF branch $p_u^g\odot q_i^g$ and an MLP branch on $[\,p_u^m\,\|\,q_i^m\,]$ with hidden sizes $(64,32,16)$. Their concatenation goes through a linear head. The original paper uses binary cross-entropy on implicit feedback; we substitute MSE since the task here is explicit-rating prediction. This adaptation means our NeuMF cannot be compared 1:1 with HR@K/NDCG@K numbers reported in the paper.
+
+\subsection{BPR-MF}
+Pairwise logistic loss on a triple $(u,i,j)$ where $i$ is observed and $j$ is an unobserved item sampled for $u$:
+\begin{equation}
+\mathcal{L}_{\text{BPR}} = -\sum_{(u,i,j)\in\mathcal{D}_S}\log\sigma\!\left(\hat x_{ui}-\hat x_{uj}\right)+\lambda\Theta,\qquad \hat x_{ui}=p_u^{\top}q_i+b_i.
+\end{equation}
+Negatives are sampled by vectorised rejection against a sparse positive mask. The scalar $b_i$ is a small deviation from Rendle et al.~\cite{Rendle2009BPR} but matches the reference implementation shipped with MyMediaLite and is now standard. $d{=}64$, 20 epochs, Adam with $\eta{=}10^{-2}$.
+
+\subsection{LightGCN}
+LightGCN~\cite{He2020LightGCN} drops GCN's feature transform and non-linearity and keeps only weighted-average propagation on the user--item bipartite graph. Let $\mathbf{A}\in\mathbb{R}^{(N_u+N_i)\times(N_u+N_i)}$ be the block adjacency and $\hat{\mathbf{A}}=\mathbf{D}^{-1/2}\mathbf{A}\mathbf{D}^{-1/2}$ its symmetric-normalised form. Layer $\ell$ is $\mathbf{E}^{(\ell)}=\hat{\mathbf{A}}\,\mathbf{E}^{(\ell-1)}$ and the final embedding averages across layers:
+\begin{equation}
+\mathbf{E}^{*}=\tfrac{1}{L+1}\sum_{\ell=0}^{L}\mathbf{E}^{(\ell)}.
+\end{equation}
+Training uses the same BPR loss. $L{=}3$, $d{=}64$. We report two runs: a short run at 15 epochs with batch 16\,384, and a matched-budget run at 20 epochs with batch 4\,096 (see \S\ref{sec:results}).
+
+%-----------------------------------------------------------------------------
+\section{Evaluation}
+Rating prediction: MAE $=\tfrac{1}{|\mathcal{D}|}\sum|r-\hat r|$, RMSE $=\sqrt{\tfrac{1}{|\mathcal{D}|}\sum(r-\hat r)^2}$, with predictions clipped to $[1,5]$. Top-$N$: for each user we score all items, mask anything already in training, take the top-$K{=}10$, and compute binary Precision@K, Recall@K, F$_1$@K, and NDCG@K, averaged across users with at least one test item. Both protocols follow the course spec directly. BPR-MF and LightGCN score on a non-rating scale, so their MAE/RMSE are reported as N/A rather than as misleading scalars.
+
+%-----------------------------------------------------------------------------
+\section{Results}\label{sec:results}
+
+\input{results_table}
+
+\paragraph{Ranking loss vs.\ pointwise loss.} BPR-MF and MF share the same bilinear scoring function, $p_u^{\top}q_i+b_i$. The difference is the loss. BPR-MF beats MF by $2.55\times$ on Precision@10 ($0.286$ vs.\ $0.112$) and $2.57\times$ on NDCG@10 ($0.320$ vs.\ $0.125$). MSE spends capacity fitting every rating, including the 2s and 3s; it is a weak proxy for ordering items at the top. BPR spends every gradient step on the thing we care about, the pairwise order of a positive against an unobserved item.
+
+\paragraph{kNN does well on rating, badly on ranking.} UserKNN and ItemKNN match MF on MAE ($0.707$ and $0.714$ vs.\ $0.704$) but trail badly on the ranking metrics. On an item the user has not seen, the centred CF estimate collapses back toward the user mean $\bar r_u$: the neighbourhood structure that drives the prediction is mostly composed of items the user has already rated, and those are masked out for Top-$N$. The scores stop discriminating.
+
+\paragraph{LightGCN vs.\ BPR-MF.} LightGCN loses this comparison---P@10 $0.183$, NDCG@10 $0.204$, well below BPR-MF. The first run used 15 epochs at batch 16\,384 ($\sim$720 gradient steps), which is much fewer than BPR-MF's $\sim$3\,900. A second run with matched gradient steps (20 epochs, batch 4\,096; $46\times$ wall-clock) produced the same numbers---no movement. Table~\ref{tab:lgcnmatch} has the details. The gap is not a compute artefact; possible causes are in \S\ref{sec:discuss}.
+
+\input{lightgcn_match_table}
+
+\paragraph{NeuMF.} NeuMF is slightly worse than MF on Top-$N$ and statistically tied on rating, echoing~\cite{Dacrema2021}: once a matrix-factorisation baseline is properly tuned, the neural tower does not add much on benchmarks of this size.
+
+%-----------------------------------------------------------------------------
+\section{Discussion}\label{sec:discuss}
+
+\paragraph{Why pointwise ranking fails.} A user's held-out 20\% contains their 2s and 3s as well as their 5s. MSE training spends gradient on fitting all of them. BPR sees only $(positive, unobserved)$ triples and spends every gradient step on the pairwise order that the ranking metrics actually reward.
+
+\paragraph{Why LightGCN did not pay off.} The matched-budget run (Table~\ref{tab:lgcnmatch}) leaves numerical doubt aside: LightGCN does not beat BPR-MF on ML-1M in our protocol. The paper reports gains on the same dataset, so the natural question is what we are doing differently. Three candidates, in descending order of how much I would bet on them:
+\begin{enumerate}[leftmargin=*]
+\item $L{=}3$ is too many layers for ML-1M. The paper's own ablation (Fig.~4 in~\cite{He2020LightGCN}) has the ML-1M optimum at $L{=}2$, with $L{=}3$ already regressing. We did not sweep $L$; this is the most likely single cause.
+\item ML-1M is already dense. At $95.2\%$ sparsity but 20-core on users, there is enough direct signal for a factor model, and neighbour-of-neighbour messages add little. LightGCN's gains in the original paper were clearest on sparser benchmarks (Amazon-Book, Yelp).
+\item Our regularisation ($\lambda{=}10^{-4}$, Adam default) is untuned. LightGCN's reported numbers come from a grid search.
+\end{enumerate}
+
+\paragraph{Cold start.} Every model here is transductive. A new user or item has no training signal and cannot be served. Side information (genres, review text) would fix this; our dataframes already carry both, but the models as written do not consume them.
+
+\paragraph{Scaling.} Total training is under 12 minutes across all seven models on a CPU (LightGCN alone is over half of that). Per-batch cost on LightGCN scales as $|\mathcal{E}|\cdot d$, which is linear in interaction count, so ML-25M should still fit on a single machine with a larger batch size.
+
+%-----------------------------------------------------------------------------
+\section{Exposure-Fairness Audit}\label{sec:fair}
+The rubric offers up to 5 bonus points for a trustworthiness task. The accuracy numbers alone flatter models that funnel every slot to popular items, so a reasonable check is whether they do.
+
+Three numbers per model, all at $K{=}10$:
+\begin{itemize}
+\item \textbf{Coverage}: fraction of the catalogue that appears in \emph{any} user's list.
+\item \textbf{Gini}: inequality of the per-item exposure distribution. $0$ is uniform, $1$ is all on one item.
+\item \textbf{Long-tail Share}: fraction of the $N_u\cdot 10$ slots that land on items outside the top-20\% most-popular in training.
+\end{itemize}
+
+\input{fairness_table}
+
+LightGCN places every single Top-10 slot on a head item (Long-tail Share $0.000$) and touches just $2.2\%$ of the catalogue. BPR-MF is one percentage point better. The two most accurate models in the ranking table are the two worst on the fairness table. UserKNN goes the other way: $87\%$ of its list is in the tail and $76\%$ of the catalogue gets seen, but its ranking accuracy is a tenth of BPR-MF's.
+
+GlobalMean produces a uniform score, so argpartition returns arbitrary items---its $87\%$ long-tail share is noise, not recommendation quality. Reading the table with this in mind: kNN's fairness is real, LightGCN's concentration is real, and anything in between is a genuine trade-off.
+
+What this changes for a deployment: NDCG-optimal is not deployment-optimal if long-tail exposure matters. The pipeline is set up to attach post-hoc re-rankers (MMR with an exposure penalty~\cite{Singh2018ExposureFair}) or training-time regularisers~\cite{Li2021UserFair} on top of BPR-MF, which is the obvious next step.
+
+%-----------------------------------------------------------------------------
+\section{Demo}
+\texttt{demo/app.py} is a Flask single-page app: pick a user ID and a model, see the top-10 list against that user's top training ratings. All seven pickled models load at startup; per-user inference is a few milliseconds.
+
+%-----------------------------------------------------------------------------
+\section{Conclusion}
+Seven recommenders, one dataset, one split. The loss function moved the ranking metrics more than any architectural choice (BPR-MF beats pointwise MF by $2.6\times$ on NDCG@10 with the same scoring function). LightGCN underperformed BPR-MF on ML-1M, and the matched-budget rerun ruled out the easiest explanation; the likely cause is $L{=}3$ being too many layers for this dataset. The fairness audit shows that the NDCG winners are also the worst popularity-concentrators, so ``use BPR in production'' is the right first move but not the last.
+
+%-----------------------------------------------------------------------------
+\begin{thebibliography}{10}
+\bibitem{Aggarwal2016} C.C.~Aggarwal. \emph{Recommender Systems: The Textbook}. Springer, 2016.
+\bibitem{Ricci2015} F.~Ricci, L.~Rokach, B.~Shapira. \emph{Recommender Systems Handbook}. Springer, 2015.
+\bibitem{Resnick1994} P.~Resnick \emph{et~al.} GroupLens: an open architecture for collaborative filtering of netnews. \emph{CSCW}, 1994.
+\bibitem{Sarwar2001} B.~Sarwar \emph{et~al.} Item-based collaborative filtering recommendation algorithms. \emph{WWW}, 2001.
+\bibitem{Koren2009} Y.~Koren, R.~Bell, C.~Volinsky. Matrix factorization techniques for recommender systems. \emph{IEEE Computer}, 2009.
+\bibitem{He2017NCF} X.~He \emph{et~al.} Neural collaborative filtering. \emph{WWW}, 2017.
+\bibitem{Rendle2009BPR} S.~Rendle \emph{et~al.} BPR: Bayesian personalized ranking from implicit feedback. \emph{UAI}, 2009.
+\bibitem{He2020LightGCN} X.~He \emph{et~al.} LightGCN: simplifying and powering graph convolution network for recommendation. \emph{SIGIR}, 2020.
+\bibitem{Dacrema2021} M.F.~Dacrema \emph{et~al.} Are we really making much progress? A worrying analysis of recent neural recommendation approaches. \emph{TOIS}, 2021.
+\bibitem{Herlocker1999} J.~Herlocker \emph{et~al.} An algorithmic framework for performing collaborative filtering. \emph{SIGIR}, 1999.
+\bibitem{Koren2008FactorizationNeighbor} Y.~Koren. Factorization meets the neighborhood: a multifaceted collaborative filtering model. \emph{KDD}, 2008.
+\bibitem{Weston2011WSABIE} J.~Weston \emph{et~al.} WSABIE: scaling up to large vocabulary image annotation. \emph{IJCAI}, 2011.
+\bibitem{Wang2019NGCF} X.~Wang \emph{et~al.} Neural graph collaborative filtering. \emph{SIGIR}, 2019.
+\bibitem{Geng2022P5} S.~Geng \emph{et~al.} Recommendation as language processing (RLP): a unified pretrain, personalized prompt \& predict paradigm (P5). \emph{RecSys}, 2022.
+\bibitem{Kang2018SASRec} W.-C.~Kang, J.~McAuley. Self-attentive sequential recommendation. \emph{ICDM}, 2018.
+\bibitem{Xu2021CCF} S.~Xu \emph{et~al.} Causal collaborative filtering. \emph{arXiv:2102.01868}, 2021.
+\bibitem{Li2021UserFair} Y.~Li \emph{et~al.} User-oriented fairness in recommendation. \emph{WWW}, 2021.
+\bibitem{Li2021PETER} L.~Li \emph{et~al.} Personalized transformer for explainable recommendation. \emph{ACL}, 2021.
+\bibitem{Tan2021CountER} J.~Tan \emph{et~al.} Counterfactual explainable recommendation. \emph{CIKM}, 2021.
+\bibitem{Singh2018ExposureFair} A.~Singh, T.~Joachims. Fairness of exposure in rankings. \emph{KDD}, 2018.
+\end{thebibliography}
+
+\end{document}

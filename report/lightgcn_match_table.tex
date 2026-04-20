@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{LightGCN under two training budgets on ML-1M. Gradient steps are (epochs $\times$ batches-per-epoch) where a batch covers $|\mathcal{D}_{\text{train}}|$/batch-size samples. The matched configuration uses the same per-batch count and the same number of epochs as our BPR-MF run.}
+\label{tab:lgcnmatch}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Configuration & Epochs & Batch & Grad.\ steps & P@10 & NDCG@10 \\
+\midrule
+Original (large batch) & 15 & 16\,384 &   $\sim$720  & 0.1826 & 0.2041 \\
+Matched (BPR-equivalent) & 20 & 4\,096 & $\sim$3{,}900 & 0.1824 & 0.2041 \\
+\midrule
+BPR-MF (reference)       & 20 & 4\,096 & $\sim$3{,}900 & \textbf{0.2861} & \textbf{0.3202} \\
+\bottomrule
+\end{tabular}
+\end{table}

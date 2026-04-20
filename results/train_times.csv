@@ -1,0 +1,9 @@
+model,train_sec
+GlobalMean,0.0
+BiasOnly,0.4
+ItemKNN,1.82
+UserKNN,3.97
+MF,33.5
+NeuMF,87.5
+BPR-MF,48.99
+LightGCN,2270.82

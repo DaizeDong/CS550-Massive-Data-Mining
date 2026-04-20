@@ -1,0 +1,20 @@
+\begin{table}[t]
+\centering
+\caption{Exposure-fairness audit on Top-10 recommendations. Higher Coverage and Long-tail Share are fairer; lower Gini is fairer.}
+\label{tab:fairness}
+\small
+\begin{tabular}{lccc}
+\toprule
+Model & Coverage@10 $\uparrow$ & Gini $\downarrow$ & Long-tail Share@10 $\uparrow$ \\
+\midrule
+GlobalMean & 0.1033 & 0.9865 & 0.8727 \\
+BiasOnly & 0.0946 & 0.9953 & 0.2597 \\
+ItemKNN & 0.8214 & 0.6899 & 0.5568 \\
+UserKNN & 0.7573 & 0.7489 & 0.8697 \\
+MF & 0.0515 & 0.9937 & 0.0149 \\
+NeuMF & 0.4798 & 0.8762 & 0.2573 \\
+BPR-MF & 0.2037 & 0.9745 & 0.0047 \\
+LightGCN & 0.0217 & 0.9946 & 0.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
