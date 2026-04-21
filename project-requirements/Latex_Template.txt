@@ -1,0 +1,5 @@
+You may consider using the following latex template to write the project report:
+
+https://www.overleaf.com/latex/templates/acm-conference-proceedings-primary-article-template/wbvnghjbzwpc
+
+Use of the above template is not mandatory, if you prefer other latex template or if you prefer to use Microsoft Word, that's fine.

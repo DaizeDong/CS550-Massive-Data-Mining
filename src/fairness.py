@@ -1,10 +1,6 @@
 """Exposure-fairness audit of the seven recommenders.
 
-Recommender systems tend to exhibit \emph{popularity bias}: rare items are
-starved of exposure while head items are repeatedly surfaced, compounding a
-feedback loop that harms long-tail producers and user discovery alike. We
-audit the models on three complementary metrics:
-
+Measures popularity bias on three metrics:
   (1) Item Coverage@K: fraction of catalog items recommended to at least
       one user within their top-K list.
   (2) Gini coefficient of the item-exposure distribution: 0 = uniform

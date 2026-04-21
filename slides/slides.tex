@@ -8,10 +8,11 @@
 \usepackage{graphicx}
 \usepackage{xcolor}
 
-\title{Seven Recommenders on MovieLens-1M}
-\subtitle{Rating prediction and Top-10 recommendation, same split}
-\author{Student Name \\ \small NetID@institution.edu}
-\institute{CS 550 Massive Data Mining and Learning}
+\title[Seven Recommenders on ML-1M]{Seven Recommenders on MovieLens-1M}
+\subtitle{Rating prediction, Top-10 recommendation, and a fairness audit}
+\author[Dong, Wu]{Daize Dong \and Jiawei Wu \\
+  \small dd1376, jw2070}
+\institute[Rutgers]{CS 550 Massive Data Mining and Learning \\ Rutgers University}
 \date{Spring 2026}
 
 \begin{document}
@@ -19,7 +20,7 @@
 \maketitle
 
 %-----------------------------------------------------------------------------
-\begin{frame}{What I built}
+\begin{frame}{What we built}
   \begin{itemize}
     \item Seven recommender algorithms, one codebase, one split.
     \item Two tasks per the course spec: rating prediction and Top-10.
@@ -58,6 +59,62 @@
     Graph       & LightGCN      & 3-layer symmetric propagation, He 2020 \\
     \bottomrule
   \end{tabular}
+\end{frame}
+
+%-----------------------------------------------------------------------------
+\begin{frame}{Methods: memory-based CF and NeuMF}
+  \textbf{ItemKNN / UserKNN.} Shrinkage-adjusted cosine on mean-centred ratings. For items:
+  \[
+    s_{ij} = \frac{\sum_{u \in \mathcal{U}_{ij}} \tilde r_{ui}\, \tilde r_{uj}}
+                  {\|\tilde r_{\cdot i}\|\,\|\tilde r_{\cdot j}\|}
+             \cdot \frac{|\mathcal{U}_{ij}|}{|\mathcal{U}_{ij}| + \alpha},
+    \qquad \alpha = 100,\ k = 50.
+  \]
+  Predict $\hat r_{ui} = \bar r_u + \big(\sum_{j \in N_k(i)\cap \mathcal{I}_u} s_{ij}\, \tilde r_{uj}\big) \big/ \sum_{j} |s_{ij}|$. UserKNN is the symmetric version on the user side.
+  \vspace{0.5em}
+
+  \textbf{NeuMF} (He et al., 2017). Two branches concatenated, then a linear head:
+  \begin{itemize}\itemsep=0.1em
+    \item GMF: $p_u^{g} \odot q_i^{g}$
+    \item MLP: $[p_u^{m} \Vert q_i^{m}]$ through hidden sizes $(64,32,16)$, ReLU + Dropout(0.1)
+  \end{itemize}
+  Explicit rating target $\Rightarrow$ trained with MSE (not the original BCE).
+\end{frame}
+
+%-----------------------------------------------------------------------------
+\begin{frame}{Methods: MF and BPR-MF share the scoring function}
+  Same scoring function $\hat r_{ui} = \mu + b_u + b_i + p_u^{\top} q_i$. Only the loss differs.
+  \vspace{0.3em}
+
+  \textbf{Biased MF} (point-wise MSE):
+  \[
+    \mathcal{L}_{\text{MF}} \;=\; \sum_{(u,i) \in \mathcal{D}_{\text{train}}} \big(r_{ui} - \hat r_{ui}\big)^{2} + \lambda\, \|\Theta\|^{2}.
+  \]
+  \hspace{1em}\small $d=64$,\ Adam lr $10^{-2}$,\ batch $8192$,\ $20$ epochs,\ $\lambda=10^{-4}$.
+  \vspace{0.3em}
+
+  \textbf{BPR-MF} (pair-wise logistic, Rendle 2009). Sample triples $(u,i,j)$ with $i$ observed, $j$ unobserved:
+  \[
+    \mathcal{L}_{\text{BPR}} \;=\; -\!\!\sum_{(u,i,j)}\!\! \log \sigma\big(\hat x_{ui} - \hat x_{uj}\big) + \lambda\, \|\Theta\|^{2},
+    \qquad \hat x_{ui} = p_u^{\top} q_i + b_i.
+  \]
+  \hspace{1em}\small Same $d$,\ Adam lr $10^{-2}$,\ batch $4096$,\ $20$ epochs,\ $\lambda=10^{-5}$.
+\end{frame}
+
+%-----------------------------------------------------------------------------
+\begin{frame}{Methods: LightGCN}
+  Strip feature transforms and non-linearities from the GCN. Keep only weighted-average propagation on the user-item bipartite graph (He et al., 2020).
+  \vspace{0.4em}
+
+  Let $\hat{\mathbf A} = \mathbf D^{-1/2} \mathbf A\, \mathbf D^{-1/2}$ be the symmetrically normalised adjacency. Each layer:
+  \[
+    \mathbf E^{(\ell)} = \hat{\mathbf A}\, \mathbf E^{(\ell-1)}.
+  \]
+  Final embedding averages across all layers:
+  \[
+    \mathbf E^{*} = \frac{1}{L+1} \sum_{\ell=0}^{L} \mathbf E^{(\ell)}.
+  \]
+  Trained with the same BPR loss as BPR-MF. We use $L=3$,\ $d=64$. Two budget configurations: short run at batch $16{,}384$ for wall-clock comparison, and a matched run at batch $4{,}096$ with the same gradient-step count as BPR-MF.
 \end{frame}
 
 %-----------------------------------------------------------------------------
@@ -110,7 +167,7 @@
 
 %-----------------------------------------------------------------------------
 \begin{frame}{Finding 2: LightGCN does not beat BPR-MF here}
-  First run (15 epochs, batch 16k) was much fewer gradient steps than BPR-MF. Easy objection: undertrained. So I reran with matched steps.
+  First run (15 epochs, batch 16k) was much fewer gradient steps than BPR-MF. Easy objection: undertrained. So we reran with matched steps.
   \vspace{0.5em}
   \begin{center}\small
   \begin{tabular}{lrrrr}
@@ -127,12 +184,12 @@
   The matched run gives the same numbers at $46\times$ the wall-clock. The gap is not a compute artefact.
   \vspace{0.3em}
 
-  Most likely cause, by the paper's own Fig.~4: $L{=}3$ is too many layers for ML-1M. The paper's ML-1M optimum is $L{=}2$. I did not sweep $L$.
+  Most likely cause, by the paper's own Fig.~4: $L{=}3$ is too many layers for ML-1M. The paper's ML-1M optimum is $L{=}2$. We did not sweep $L$.
 \end{frame}
 
 %-----------------------------------------------------------------------------
-\begin{frame}{Fairness audit}
-  If a model funnels every recommendation to the most popular 10 movies, it will look fine on NDCG and terrible on the tail. Worth checking.
+\begin{frame}{Fairness audit \hfill \small\textit{(Optional Task: Fairness and Unbiases)}}
+  Bonus task from the project description. If a model funnels every recommendation to the most popular 10 movies, it will look fine on NDCG and terrible on the tail. Worth checking.
   \vspace{0.3em}
   \begin{center}\small
   \begin{tabular}{lrrr}
@@ -156,11 +213,26 @@
 
 %-----------------------------------------------------------------------------
 \begin{frame}{Web demo}
-  Flask + vanilla JS. Pick a user ID, pick a model, get a top-10 list next to that user's top-rated training history. All seven pickled models load at startup; per-user inference is a few milliseconds.
+  \begin{columns}[T]
+    \begin{column}{0.56\textwidth}
+      \vspace{0.3em}
+      Flask + vanilla JS. Pick a user ID, pick a model, get a top-10 list next to that user's top-rated training history.
+      \vspace{0.5em}
+
+      All seven pickled models load at startup; per-user inference is a few milliseconds.
+      \vspace{0.5em}
+
+      \small \texttt{python -m demo.app} $\to$ \texttt{localhost:5000}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \centering
+      \includegraphics[height=0.78\textheight]{../results/demo_screenshot.png}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 %-----------------------------------------------------------------------------
-\begin{frame}{What I did not do}
+\begin{frame}{What we did not do}
   \begin{itemize}
     \item Cold start. Every model is transductive; extending to side information is a separate project.
     \item Temporal dynamics. Timestamps are in the data but the models do not read them.
